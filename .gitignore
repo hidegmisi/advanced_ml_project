@@ -1,2 +1,5 @@
 .DS_Store
 data/
+CapsNet/__pycache__/
+DenseNet121/__pycache__/
+custom_cnn/__pycache__/
