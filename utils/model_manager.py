@@ -295,10 +295,10 @@ if __name__ == "__main__":
     # Train models (uncomment to train)
     # manager.train_model("densenet121", epochs=5)
     # manager.train_model("custom_cnn", epochs=5)
-    manager.train_model("capsnet", epochs=5)
+    # manager.train_model("capsnet", epochs=5)
     
     # Compare models
-    # results = manager.compare_models()
+    results = manager.compare_models()
     
     print("Model manager initialized successfully. Use the following methods to manage models:")
     print("- initialize_model(model_name): Initialize a specific model")
