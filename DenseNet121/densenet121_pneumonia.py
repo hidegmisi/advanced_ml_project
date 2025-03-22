@@ -25,7 +25,7 @@ class DenseNet121Model(BaseModel):
         # Add Custom Layers on top
         x = GlobalAveragePooling2D()(base_model.output)
         x = Dense(256, activation="relu")(x)
-        x = Dropout(0.5)(x)
+        x = Dropout(0.1)(x)
         output = Dense(1, activation="sigmoid")(x)  # Binary classification
 
         # Create the final model
