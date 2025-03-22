@@ -37,7 +37,7 @@ class ModelManager:
         # Create directories for saving comparisons
         os.makedirs('comparisons', exist_ok=True)
     
-    def initialize_model(self, model_name):
+    def initialize_model(self, model_name, weights_path=None):
         """Initialize and configure a specific model."""
         model_name = model_name.lower()
         
@@ -50,8 +50,30 @@ class ModelManager:
             self.models[model_name] = CustomCNNModel(img_size=self.img_size, batch_size=self.batch_size)
         elif model_name == "capsnet":
             # CapsNet typically works better with smaller images
-            capsnet_img_size = (28, 28)  # Standard size for MNIST-like models
+            capsnet_img_size = (128, 128)  # Use the size defined in our CapsNet class
             self.models[model_name] = CapsNet(img_size=capsnet_img_size, batch_size=self.batch_size)
+        
+        # Setup data generators
+        self.models[model_name].setup_data_generators(
+            train_dir=self.train_dir,
+            val_dir=self.val_dir,
+            test_dir=self.test_dir
+        )
+        
+        # Build model
+        self.models[model_name].build_model()
+        
+        # Load weights if provided
+        if weights_path:
+            model_weights_path = weights_path
+            if os.path.isdir(weights_path):
+                model_weights_path = os.path.join(weights_path, f"{model_name}_weights.h5")
+            
+            if os.path.exists(model_weights_path):
+                print(f"Loading weights for {model_name} from {model_weights_path}")
+                self.models[model_name].model.load_weights(model_weights_path)
+            else:
+                print(f"Warning: No weights found at {model_weights_path}")
         
         return self.models[model_name]
     
@@ -60,27 +82,15 @@ class ModelManager:
         for model_name in self.models.keys():
             self.initialize_model(model_name)
     
-    def train_model(self, model_name, epochs=10, save_best_only=True):
-        """Train a specific model."""
-        model_name = model_name.lower()
+    def train_model(self, model_name, epochs=10):
+        model = self.get_model(model_name)
         
-        if model_name not in self.models or self.models[model_name] is None:
-            self.initialize_model(model_name)
+        print(f"Training {model_name} for {epochs} epochs...")
+        history = model.train(epochs=epochs)
         
-        model = self.models[model_name]
-        
-        # Setup data generators
-        model.setup_data_generators(
-            train_dir=self.train_dir,
-            val_dir=self.val_dir,
-            test_dir=self.test_dir
-        )
-        
-        # Build model
-        model.build_model()
-        
-        # Train model
-        history = model.train(epochs=epochs, save_best_only=save_best_only)
+        weights_path = f"weights/{model_name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.weights.h5"
+        model.model.save_weights(weights_path)
+        print(f"Model weights saved to {weights_path}")
         
         return history
     
@@ -142,16 +152,6 @@ class ModelManager:
                 self.initialize_model(model_name)
             
             model = self.models[model_name]
-            
-            # Setup data generators
-            model.setup_data_generators(
-                train_dir=self.train_dir,
-                val_dir=self.val_dir,
-                test_dir=self.test_dir
-            )
-            
-            # Build model
-            model.build_model()
             
             # Load weights if provided
             if weights_paths is not None:
@@ -284,6 +284,18 @@ class ModelManager:
         
         return histories
 
+    def get_model(self, model_name):
+        """Get a model by name."""
+        model_name = model_name.lower()
+        
+        if model_name not in self.models:
+            raise ValueError(f"Unknown model name: {model_name}. Available models: {list(self.models.keys())}")
+            
+        if self.models[model_name] is None:
+            raise ValueError(f"Model {model_name} not initialized. Call initialize_model() first.")
+            
+        return self.models[model_name]
+
 # Example usage
 if __name__ == "__main__":
     # Create model manager
@@ -294,11 +306,11 @@ if __name__ == "__main__":
     
     # Train models (uncomment to train)
     # manager.train_model("densenet121", epochs=5)
-    # manager.train_model("custom_cnn", epochs=5)
+    manager.train_model("custom_cnn", epochs=20)
     # manager.train_model("capsnet", epochs=5)
     
     # Compare models
-    results = manager.compare_models()
+    #results = manager.compare_models()
     
     print("Model manager initialized successfully. Use the following methods to manage models:")
     print("- initialize_model(model_name): Initialize a specific model")

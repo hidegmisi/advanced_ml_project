@@ -49,63 +49,26 @@ def main():
     # Initialize models
     for model_name in models:
         print(f"Initializing {model_name}...")
-        manager.initialize_model(model_name)
-    
-    # Train models if requested
-    if args.train:
-        for model_name in models:
-            print(f"Training {model_name}...")
-            history = manager.train_model(model_name, epochs=args.epochs)
-            
-            # Save training history
-            history_path = f"history/{model_name}_history.json"
-            manager.models[model_name].save_training_history(history_path)
-            print(f"Training history saved to {history_path}")
-            
-            # Plot training history
-            manager.models[model_name].plot_training_history()
-    
-    # Evaluate models if requested
-    if args.evaluate:
-        print("\nModel Evaluation Results:")
-        print("--------------------------")
+        manager.initialize_model(model_name, weights_path=args.weights_path)
         
-        for model_name in models:
-            # Load weights if provided
-            if args.weights_path:
-                weights_file = os.path.join(args.weights_path, f"{model_name}_weights.h5")
-                if os.path.exists(weights_file):
-                    print(f"Loading weights for {model_name} from {weights_file}")
-                    manager.load_model_weights(model_name, weights_file)
+        # Train models if requested
+        if args.train:
+            print(f"Training {model_name}...")
+            manager.train_model(model_name, epochs=args.epochs)
             
-            # Evaluate model
-            print(f"\nEvaluating {model_name}...")
-            accuracy, loss, report = manager.evaluate_model(model_name)
-            
-            # Print results
-            print(f"Test Accuracy: {accuracy:.4f}")
-            print(f"Test Loss: {loss:.4f}")
-            print(f"Classification Report:\n{report}")
-            
-            # Plot confusion matrix
-            manager.models[model_name].plot_confusion_matrix()
+            history_path = f"history/{model_name}_latest.json"
+            print(f"Saving training history to {history_path}")
+            manager.models[model_name].save_training_history(history_path)
+        
+        # Evaluate models if requested
+        if args.evaluate:
+            print(f"Evaluating {model_name}...")
+            manager.evaluate_model(model_name)
     
     # Compare models if requested
     if args.compare and len(models) > 1:
         print("\nComparing Models...")
-        
-        # Compare model performance
-        results = manager.compare_models(model_names=models)
-        
-        # Compare training histories
-        history_paths = [f"history/{model_name}_history.json" for model_name in models]
-        history_exists = all(os.path.exists(path) for path in history_paths)
-        
-        if history_exists:
-            print("Comparing training histories...")
-            manager.compare_training_history(model_names=models, history_paths=history_paths)
-        else:
-            print("Training histories not available for all models. Skipping history comparison.")
+        manager.compare_models(models)
 
 if __name__ == "__main__":
     main()

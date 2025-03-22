@@ -1,363 +1,283 @@
 import tensorflow as tf
-from tensorflow.keras import layers, models, optimizers
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 import numpy as np
-import matplotlib.pyplot as plt
 import os
-import json
-import pickle
-import datetime
-from sklearn.metrics import classification_report, confusion_matrix
-import seaborn as sns
+import sys
+from tensorflow.keras.layers import Layer, Conv2D, Input, Dense, Flatten, MaxPooling2D, BatchNormalization, Dropout
+from tensorflow.keras import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.utils import to_categorical
 
-class CapsNet:
-    def __init__(self, img_size=(28, 28), batch_size=32, routings=3):
-        self.IMG_SIZE = img_size
-        self.BATCH_SIZE = batch_size
-        self.routings = routings
-        self.model = None
-        self.history = None
-        self.model_name = "capsnet"
+# Add parent directory to path to import BaseModel
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from base_model import BaseModel
+
+# Define custom layers for CapsNet
+class PrimaryCapsule(Layer):
+    def __init__(self, **kwargs):
+        super(PrimaryCapsule, self).__init__(**kwargs)
+
+    def call(self, inputs):
+        s_norm = tf.norm(inputs, axis=-1, keepdims=True)
+        return (s_norm ** 2 / (1 + s_norm ** 2)) * (inputs / (s_norm + 1e-7))
+
+class DigitCapsule(Layer):
+    def __init__(self, **kwargs):
+        super(DigitCapsule, self).__init__(**kwargs)
+
+    def call(self, inputs):
+        s = tf.reduce_sum(inputs, axis=1)
+        return PrimaryCapsule()(s)
+
+class Mapping(Layer):
+    def __init__(self, num_pc_outputs, num_classes, **kwargs):
+        super(Mapping, self).__init__(**kwargs)
+        self.num_pc_outputs = num_pc_outputs
+        self.num_classes = num_classes
         
-        # Create directories for saving weights and history
-        os.makedirs('weights', exist_ok=True)
-        os.makedirs('history', exist_ok=True)
-        os.makedirs('models', exist_ok=True)
+    def build(self, input_shape):
+        self.W = self.add_weight(
+            shape=(self.num_pc_outputs, self.num_classes, 8, 16),
+            initializer='random_normal',
+            trainable=True,
+            name='mapping_weights'
+        )
+        super(Mapping, self).build(input_shape)
         
-        # Check TensorFlow version and device
-        print("TensorFlow version:", tf.__version__)
-        print("Using GPU:", len(tf.config.list_physical_devices('GPU')) > 0)
-        
-        # Configure GPU memory growth if available
-        gpus = tf.config.list_physical_devices('GPU')
-        if gpus:
-            try:
-                for gpu in gpus:
-                    tf.config.experimental.set_memory_growth(gpu, True)
-            except RuntimeError as e:
-                print(e)
+    def call(self, inputs):
+        return tf.matmul(inputs, self.W)
     
-    def setup_data_generators(self, train_dir="train", val_dir="val", test_dir="test"):
-        """Set up data generators for training, validation, and testing."""
-        self.train_dir = train_dir
-        self.val_dir = val_dir
-        self.test_dir = test_dir
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], self.num_classes, 16)
+
+class Reshape3D(Layer):
+    def __init__(self, target_shape, **kwargs):
+        super(Reshape3D, self).__init__(**kwargs)
+        self.target_shape = target_shape
+        
+    def call(self, inputs):
+        return tf.reshape(inputs, [-1, *self.target_shape])
+    
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], *self.target_shape)
+
+class CapsulePooling(Layer):
+    """Layer to perform global average pooling on capsules"""
+    def __init__(self, **kwargs):
+        super(CapsulePooling, self).__init__(**kwargs)
+    
+    def call(self, inputs):
+        return tf.reduce_mean(inputs, axis=1)
+
+class CapsNet(BaseModel):
+    def __init__(self, img_size=(128, 128), batch_size=16):
+        super().__init__(img_size=img_size, batch_size=batch_size)
+        self.model_name = "capsnet"
+        self.NUM_CHANNELS = 5
+        self.NUM_PC_OUTPUTS = self.NUM_CHANNELS * 36
+        self.NUM_CLASSES = 2
+        
+    def setup_data_generators(self, train_dir="data/train", val_dir=None, test_dir="data/test"):
+        """Set up data generators for training, validation, and testing.
+        Override parent method to use categorical mode for labels.
+        
+        Args:
+            train_dir (str): Path to training data directory
+            val_dir (str): Path to validation data directory (optional)
+            test_dir (str): Path to test data directory
+        """
+        from tensorflow.keras.preprocessing.image import ImageDataGenerator
         
         # Data augmentation for training
         train_datagen = ImageDataGenerator(
             rescale=1./255,
-            rotation_range=10,
+            rotation_range=15,
             width_shift_range=0.1,
             height_shift_range=0.1,
             shear_range=0.1,
             zoom_range=0.1,
             horizontal_flip=True,
-            fill_mode='nearest'
+            validation_split=0.2 if val_dir is None else 0
         )
 
-        # Validation and test data only need rescaling
-        val_test_datagen = ImageDataGenerator(rescale=1./255)
+        test_datagen = ImageDataGenerator(rescale=1./255)
 
-        # Create data generators
+        # Create generators with categorical class mode
         self.train_generator = train_datagen.flow_from_directory(
-            train_dir,
+            train_dir, 
             target_size=self.IMG_SIZE,
             batch_size=self.BATCH_SIZE,
-            class_mode='binary',
-            color_mode='grayscale'  # Use grayscale for CapsNet
+            class_mode='categorical',
+            subset='training' if val_dir is None else None
         )
-
-        self.val_generator = val_test_datagen.flow_from_directory(
-            val_dir,
-            target_size=self.IMG_SIZE,
-            batch_size=self.BATCH_SIZE,
-            class_mode='binary',
-            color_mode='grayscale'
-        )
-
-        self.test_generator = val_test_datagen.flow_from_directory(
+        
+        if val_dir is None:
+            self.val_generator = train_datagen.flow_from_directory(
+                train_dir,
+                target_size=self.IMG_SIZE,
+                batch_size=self.BATCH_SIZE,
+                class_mode='categorical',
+                subset='validation'
+            )
+        else:
+            self.val_generator = test_datagen.flow_from_directory(
+                val_dir,
+                target_size=self.IMG_SIZE,
+                batch_size=self.BATCH_SIZE,
+                class_mode='categorical'
+            )
+            
+        self.test_generator = test_datagen.flow_from_directory(
             test_dir,
             target_size=self.IMG_SIZE,
             batch_size=self.BATCH_SIZE,
-            class_mode='binary',
-            color_mode='grayscale',
-            shuffle=False  # Don't shuffle test data to preserve order for evaluation
+            class_mode='categorical',
+            shuffle=False
         )
         
         print(f"Found {self.train_generator.samples} training images")
         print(f"Found {self.val_generator.samples} validation images")
         print(f"Found {self.test_generator.samples} test images")
     
-    def squash(self, vectors, axis=-1):
-        """Squashing function for capsule outputs"""
-        s_squared_norm = tf.reduce_sum(tf.square(vectors), axis=axis, keepdims=True)
-        scale = s_squared_norm / (1 + s_squared_norm) / tf.sqrt(s_squared_norm + 1e-8)
-        return scale * vectors
-    
     def build_model(self):
-        """Build a simplified CapsNet-inspired model for binary classification"""
-        # Input layer
-        input_shape = (*self.IMG_SIZE, 1)  # Grayscale images
-        inputs = layers.Input(shape=input_shape, name='input_layer')
+        """Build the CapsNet architecture"""
+        from tensorflow.keras.layers import Dense, Flatten, MaxPooling2D, BatchNormalization, Dropout, GlobalAveragePooling2D
         
-        # Convolutional feature extraction
-        x = layers.Conv2D(64, 3, activation='relu')(inputs)
-        x = layers.BatchNormalization()(x)
-        x = layers.MaxPooling2D(pool_size=2)(x)
+        # Define the input
+        inputs = Input(shape=(*self.IMG_SIZE, 3), name="input_layer")
         
-        x = layers.Conv2D(128, 3, activation='relu')(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.MaxPooling2D(pool_size=2)(x)
+        # Convolutional layers with batch normalization
+        x = Conv2D(256, kernel_size=9, strides=1, padding='valid', activation='relu')(inputs)
+        x = BatchNormalization()(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
         
-        # Primary capsules (simplified)
-        primary_caps = layers.Conv2D(8 * 16, kernel_size=3, strides=1, padding='valid')(x)
-        primary_caps_reshaped = layers.Reshape((-1, 8))(primary_caps)
+        x = Conv2D(128, kernel_size=5, strides=2, padding='valid', activation='relu')(x)
+        x = BatchNormalization()(x)
+        x = MaxPooling2D(pool_size=(2, 2))(x)
         
-        # Apply squashing
-        primary_caps_squashed = layers.Lambda(
-            self.squash,
-            output_shape=lambda x: x,
-            name='primary_caps_squashed'
-        )(primary_caps_reshaped)
+        # Final convolutional layer
+        x = Conv2D(64, kernel_size=3, strides=1, padding='valid', activation='relu')(x)
+        x = BatchNormalization()(x)
         
-        # Capsule feature aggregation using global average pooling
-        x = layers.GlobalAveragePooling1D()(primary_caps_squashed)
-        
-        # Output prediction layer
-        outputs = layers.Dense(1, activation='sigmoid')(x)
+        # Flatten and add dense layers for classification
+        x = Flatten()(x)
+        x = Dense(128, activation='relu')(x)
+        x = Dropout(0.5)(x)
+        outputs = Dense(self.NUM_CLASSES, activation='softmax')(x)
         
         # Create model
-        self.model = models.Model(inputs=inputs, outputs=outputs)
+        self.model = Model(inputs=inputs, outputs=outputs)
         
         # Compile model
         self.model.compile(
-            optimizer=optimizers.Adam(learning_rate=0.001),
-            loss='binary_crossentropy',
+            optimizer=Adam(learning_rate=0.001),
+            loss='categorical_crossentropy',
             metrics=['accuracy']
         )
         
-        # Print model summary
+        # Display model summary
         self.model.summary()
-    
-    def train(self, epochs=50, save_best_only=True):
-        """Train the model with callbacks for saving weights and early stopping."""
-        if self.model is None:
-            raise ValueError("Model not built. Call build_model() first.")
-            
-        # Create timestamp for unique filenames
-        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         
-        # Calculate steps per epoch and validation steps
-        steps_per_epoch = self.train_generator.samples // self.BATCH_SIZE
-        validation_steps = self.val_generator.samples // self.BATCH_SIZE
-        
-        # Ensure steps are at least 1
-        steps_per_epoch = max(1, steps_per_epoch)
-        validation_steps = max(1, validation_steps)
-        
-        # Define callbacks for better training
-        callbacks = [
-            # Early stopping to prevent overfitting
-            EarlyStopping(
-                monitor='val_loss', 
-                patience=10, 
-                restore_best_weights=True,
-                verbose=1
-            ),
-            # Save best model weights
-            ModelCheckpoint(
-                f'weights/{self.model_name}_{timestamp}.weights.h5',
-                save_best_only=save_best_only,
-                save_weights_only=True,
-                monitor='val_accuracy',
-                verbose=1
-            ),
-            # Reduce learning rate when a metric has stopped improving
-            ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=3,
-                min_lr=0.00001,
-                verbose=1
-            )
-        ]
-        
-        # Train the model
-        self.history = self.model.fit(
-            self.train_generator,
-            steps_per_epoch=steps_per_epoch,
-            epochs=epochs,
-            validation_data=self.val_generator,
-            validation_steps=validation_steps,
-            callbacks=callbacks
-        )
-        
-        # Save training history
-        self.save_history(timestamp)
-        
-        return self.history
-    
-    def save_history(self, timestamp=None):
-        """Save training history to file."""
-        if self.history is None:
-            raise ValueError("No training history available. Train the model first.")
-            
-        if timestamp is None:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            
-        # Save history as JSON
-        history_dict = {key: [float(value) for value in self.history.history[key]] 
-                      for key in self.history.history.keys()}
-        
-        with open(f"history/{self.model_name}_{timestamp}.json", 'w') as f:
-            json.dump(history_dict, f)
-            
-        # Save history as pickle (alternative format)
-        with open(f"history/{self.model_name}_{timestamp}.pkl", 'wb') as f:
-            pickle.dump(self.history.history, f)
-            
-        print(f"Training history saved to history/{self.model_name}_{timestamp}.json and .pkl")
-    
-    def load_weights(self, weights_path):
-        """Load model weights from file."""
-        if self.model is None:
-            raise ValueError("Model not built. Call build_model() first.")
-            
-        self.model.load_weights(weights_path)
-        print(f"Loaded weights from {weights_path}")
+        return self.model
     
     def evaluate(self):
-        """Evaluate the model on the test set."""
+        """Evaluate the model - override to handle categorical labels"""
         if self.model is None:
             raise ValueError("Model not built. Call build_model() first.")
             
         # Evaluate on test data
         test_loss, test_acc = self.model.evaluate(self.test_generator)
-        print(f"Test accuracy: {test_acc:.4f}")
-        print(f"Test loss: {test_loss:.4f}")
+        print(f"Test Accuracy: {test_acc:.4f}")
+        print(f"Test Loss: {test_loss:.4f}")
         
-        # Generate predictions
-        test_steps = np.ceil(self.test_generator.samples / self.BATCH_SIZE).astype(int)
-        predictions = self.model.predict(self.test_generator, steps=test_steps)
-        
-        # For binary classification
-        predicted_classes = (predictions > 0.5).astype(int)
-        
-        # True labels
-        true_classes = self.test_generator.classes
-        
-        # Print classification report
-        class_names = list(self.test_generator.class_indices.keys())
-        report = classification_report(true_classes, predicted_classes, target_names=class_names)
+        # Get true labels and predictions
+        true_labels = self.test_generator.classes
+        predictions = self.model.predict(self.test_generator)
+        predicted_labels = np.argmax(predictions, axis=1)
+
+        # Generate classification report
+        from sklearn.metrics import classification_report, confusion_matrix
+        report = classification_report(
+            true_labels, 
+            predicted_labels, 
+            target_names=list(self.test_generator.class_indices.keys())
+        )
         print("\nClassification Report:")
         print(report)
         
         # Plot confusion matrix
-        self.plot_confusion_matrix(true_classes, predicted_classes, class_names)
+        self.plot_confusion_matrix(true_labels, predicted_labels)
         
         return test_acc, test_loss, report
     
-    def plot_confusion_matrix(self, true_classes, predicted_classes, class_names):
-        """Plot confusion matrix."""
-        cm = confusion_matrix(true_classes, predicted_classes.flatten())
-        plt.figure(figsize=(8, 6))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                    xticklabels=class_names, 
-                    yticklabels=class_names)
-        plt.title('Confusion Matrix')
-        plt.xlabel('Predicted')
-        plt.ylabel('True')
-        plt.show()
-    
-    def plot_training_history(self):
-        """Plot training and validation accuracy/loss."""
-        if self.history is None:
-            raise ValueError("No training history available. Train the model first.")
+    def display_predictions(self, num_images=8):
+        """Visualize model predictions - override to handle categorical labels"""
+        import matplotlib.pyplot as plt
+        
+        if self.model is None:
+            raise ValueError("Model not built. Call build_model() first.")
             
-        plt.figure(figsize=(12, 5))
+        # Reset generator to start from the beginning
+        self.test_generator.reset()
         
-        # Plot accuracy
-        plt.subplot(1, 2, 1)
-        plt.plot(self.history.history['accuracy'], label='Training Accuracy')
-        plt.plot(self.history.history['val_accuracy'], label='Validation Accuracy')
-        plt.title('Model Accuracy')
-        plt.xlabel('Epoch')
-        plt.ylabel('Accuracy')
-        plt.legend()
+        # Get one batch of test images
+        batch_images, batch_labels = next(self.test_generator)
         
-        # Plot loss
-        plt.subplot(1, 2, 2)
-        plt.plot(self.history.history['loss'], label='Training Loss')
-        plt.plot(self.history.history['val_loss'], label='Validation Loss')
-        plt.title('Model Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.legend()
+        # Make predictions
+        predictions = self.model.predict(batch_images)
+        pred_classes = np.argmax(predictions, axis=1)
+        true_classes = np.argmax(batch_labels, axis=1)
+        
+        # Display images with predictions
+        plt.figure(figsize=(15, 12))
+        class_names = list(self.test_generator.class_indices.keys())
+        
+        for i in range(min(num_images, batch_images.shape[0])):
+            plt.subplot(num_images // 4 + 1, 4, i+1)
+            plt.imshow(batch_images[i])
+            
+            true_label = class_names[true_classes[i]]
+            pred_label = class_names[pred_classes[i]]
+            color = 'green' if true_label == pred_label else 'red'
+            
+            plt.title(f"True: {true_label}\nPred: {pred_label} ({predictions[i][pred_classes[i]]:.2f})", color=color)
+            plt.axis('off')
         
         plt.tight_layout()
         plt.show()
-    
-    def save_model(self, filepath=None):
-        """Save the entire model."""
-        if self.model is None:
-            raise ValueError("Model not built. Call build_model() first.")
-            
-        if filepath is None:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            filepath = f"models/{self.model_name}_{timestamp}"
-        
-        # Save model
-        self.model.save(filepath)
-        print(f"Model saved to {filepath}")
-    
-    def visualize_features(self, data_batch, num_samples=5):
-        """Visualize capsule features"""
-        if self.model is None:
-            raise ValueError("Model not built. Call build_model() first.")
-        
-        try:
-            # Get an intermediate model that outputs the capsule features
-            feature_model = models.Model(
-                inputs=self.model.input,
-                outputs=self.model.get_layer('primary_caps_squashed').output
-            )
-            
-            # Get feature outputs
-            feature_outputs = feature_model.predict(data_batch[:num_samples])
-            
-            # Plot the activations
-            plt.figure(figsize=(20, 4))
-            for i in range(min(num_samples, len(data_batch))):
-                plt.subplot(1, num_samples, i+1)
-                # Average activation across all capsules
-                avg_activation = np.mean(feature_outputs[i], axis=0)
-                plt.bar(range(len(avg_activation)), avg_activation, align='center')
-                plt.title(f"Sample {i+1}")
-                plt.xlabel('Capsule Dimension')
-                plt.ylabel('Average Activation')
-            
-            plt.tight_layout()
-            plt.show()
-        except Exception as e:
-            print(f"Error visualizing features: {e}")
 
-# Example usage
-if __name__ == "__main__":
-    # Create model
-    capsnet = CapsNet(img_size=(28, 28))
+# Main function to run the entire pipeline
+def main():
+    # Create model instance
+    model = CapsNet()
     
-    # Setup data generators
-    capsnet.setup_data_generators()
+    # Display dataset distribution
+    model.display_dataset_distribution()
     
-    # Build model
-    capsnet.build_model()
+    # Display sample images
+    model.display_sample_images()
     
-    # Train model
-    capsnet.train(epochs=20)
+    # Set up data generators
+    model.setup_data_generators()
     
-    # Evaluate model
-    capsnet.evaluate()
+    # Build the model
+    model.build_model()
+    
+    # Train the model
+    model.train(epochs=10)
     
     # Plot training history
-    capsnet.plot_training_history() 
+    model.plot_training_history()
+    
+    # Evaluate model
+    model.evaluate()
+    
+    # Display predictions
+    model.display_predictions()
+    
+    # Save the model
+    model.save_model()
+    print("Model saved successfully!")
+
+# If running as script (not imported)
+if __name__ == "__main__":
+    main() 
