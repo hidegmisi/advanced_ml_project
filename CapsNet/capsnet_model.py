@@ -1,5 +1,4 @@
 import tensorflow as tf
-import numpy as np
 import os
 import sys
 from tensorflow.keras.layers import Conv2D, Input, Dense, Flatten, MaxPooling2D
@@ -41,41 +40,27 @@ class CapsNetModel(BaseModel):
             metrics=['accuracy']
         )
         
+        self.model.summary()
         return self.model
 
-# Main function to run the entire pipeline
-def main():
+if __name__ == "__main__":
     # Create model instance
-    model = CapsNet()
+    model = CapsNetModel()
     
-    # Display dataset distribution
-    model.display_dataset_distribution()
+    # Show dataset distribution
+    model.show_data_distribution()
     
-    # Display sample images
-    model.display_sample_images()
-    
-    # Set up data generators
+    # Setup data generators and build model
     model.setup_data_generators()
-    
-    # Build the model
     model.build_model()
     
-    # Train the model
+    # Train and evaluate
     model.train(epochs=10)
-    
-    # Plot training history
-    model.plot_training_history()
-    
-    # Evaluate model
     model.evaluate()
     
-    # Display predictions
-    model.display_predictions()
+    # Visualize results
+    model.plot_training_history()
+    model.plot_confusion_matrix()
     
     # Save the model
-    model.save_model()
-    print("Model saved successfully!")
-
-# If running as script (not imported)
-if __name__ == "__main__":
-    main() 
+    model.save_model() 

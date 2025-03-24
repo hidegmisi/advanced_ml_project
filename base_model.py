@@ -76,7 +76,7 @@ class BaseModel:
         if save_weights:
             callbacks.append(
                 ModelCheckpoint(
-                    filepath=f"weights/{self.model_name}_best.h5",
+                    filepath=f"weights/{self.model_name}_best.weights.h5",
                     monitor='val_accuracy',
                     save_best_only=True,
                     save_weights_only=True
@@ -245,7 +245,7 @@ class BaseModel:
             raise ValueError("Model not built. Call build_model() first.")
             
         if filepath is None:
-            filepath = f"weights/{self.model_name}_final.h5"
+            filepath = f"weights/{self.model_name}_final.weights.h5"
             
         # Save weights
         self.model.save_weights(filepath)

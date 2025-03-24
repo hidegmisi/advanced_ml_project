@@ -2,6 +2,6 @@
 data/
 CapsNet/__pycache__/
 DenseNet121/__pycache__/
-custom_cnn/__pycache__/
+CustomCNN/__pycache__/
 utils/__pycache__/
 /__pycache__/
