@@ -24,7 +24,7 @@ class CustomCNNModel(BaseModel):
         """Build a simple CNN model"""
         
         model = models.Sequential()
-        model.add(layers.Conv2D(32 , (3,3) , strides = 1 , padding = 'same' , activation = 'relu' , input_shape = (self.IMG_SIZE,self.IMG_SIZE,3)))
+        model.add(layers.Conv2D(32 , (3,3) , strides = 1 , padding = 'same' , activation = 'relu' , input_shape = (*self.IMG_SIZE,3)))
         model.add(layers.BatchNormalization())
         model.add(layers.MaxPool2D((2,2) , strides = 2 , padding = 'same'))
         model.add(layers.Conv2D(64 , (3,3) , strides = 1 , padding = 'same' , activation = 'relu'))
